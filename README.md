@@ -31,4 +31,4 @@ Uygulama: http://localhost:8501
 
 ## Notlar
 - `fiyatopt.db` yerel veritabani dosyasidir ve `.gitignore` ile dislanir.
-- PDF uretimi icin Windows Arial fontu varsa Turkce karakterler daha iyi gorunur.
+- PDF uretimi icin WeasyPrint kullanilir; Streamlit Cloud icin `packages.txt` gereklidir.

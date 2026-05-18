@@ -15,6 +15,11 @@ import pandas as pd
 from io import BytesIO
 import os
 from fpdf import FPDF
+try:
+    from weasyprint import HTML
+    WEASYPRINT_AVAILABLE = True
+except Exception:
+    WEASYPRINT_AVAILABLE = False
 from typing import Optional, Tuple, Dict
 import traceback
 
@@ -533,8 +538,67 @@ def _pdf_safe(text: str) -> str:
     except UnicodeEncodeError:
         return text.encode("latin-1", "ignore").decode("latin-1")
 
+def _html_report_base(page_title: str, content_html: str) -> str:
+    """PDF icin sade HTML iskeleti."""
+    css = """
+    @page { size: A4; margin: 16mm; }
+    body { font-family: DejaVu Sans, Arial, sans-serif; background: #f1f5f9; color: #0f172a; }
+    .page-header { background: linear-gradient(135deg, #1a56db 0%, #0ea5e9 100%); border-radius: 14px; padding: 16px 20px; color: #fff; }
+    .page-header h1 { margin: 0; font-size: 18px; }
+    .page-header p { margin: 4px 0 0; font-size: 11px; opacity: 0.9; }
+    .info-box { background: #eff6ff; border-left: 4px solid #1a56db; border-radius: 0 8px 8px 0; padding: 10px 12px; margin: 10px 0 14px; font-size: 11px; }
+    .two-col { display: flex; gap: 10px; margin-bottom: 10px; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); flex: 1; }
+    .badge { display: inline-block; background: linear-gradient(135deg, #1a56db, #0ea5e9); color: #fff; border-radius: 999px; padding: 4px 10px; font-size: 10px; font-weight: 600; margin-bottom: 8px; }
+    .badge-green { background: linear-gradient(135deg, #059669, #10b981); }
+    .metric-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .metric-table td { padding: 6px 0; border-bottom: 1px solid #f1f5f9; }
+    .metric-table td:last-child { text-align: right; font-weight: 600; }
+    .table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    .table th { background: #1e293b; color: #fff; padding: 6px 8px; text-align: left; }
+    .table td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+    .table tr:nth-child(even) td { background: #f8fafc; }
+    h3 { margin: 6px 0 8px; font-size: 12px; }
+    """
+    return f"""
+    <!doctype html>
+    <html>
+    <head>
+        <meta charset="utf-8" />
+        <title>{page_title}</title>
+        <style>{css}</style>
+    </head>
+    <body>
+        {content_html}
+    </body>
+    </html>
+    """
+
+def _html_metric_table(rows: list) -> str:
+    """Ana metrikleri tablo olarak yazdir."""
+    row_html = "".join([f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in rows])
+    return f"<table class=\"metric-table\">{row_html}</table>"
+
+def _html_table_from_df(df: pd.DataFrame, header_title: str = "") -> str:
+    """DataFrame'i HTML tabloya cevir."""
+    if df is None or df.empty:
+        return ""
+    head_html = "".join([f"<th>{col}</th>" for col in df.columns])
+    body_rows = []
+    for _, row in df.iterrows():
+        cols = "".join([f"<td>{row[col]}</td>" for col in df.columns])
+        body_rows.append(f"<tr>{cols}</tr>")
+    header = f"<h3>{header_title}</h3>" if header_title else ""
+    return f"{header}<table class=\"table\"><tr>{head_html}</tr>{''.join(body_rows)}</table>"
+
 def _pdf_from_dataframe(title: str, df: pd.DataFrame) -> bytes:
     """DataFrame'i basit tablo olarak PDF'e cevir."""
+    if WEASYPRINT_AVAILABLE:
+        html = _html_report_base(
+            page_title=title,
+            content_html=_html_table_from_df(df, header_title=title)
+        )
+        return HTML(string=html).write_pdf()
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.add_page()
@@ -558,7 +622,8 @@ def _pdf_from_dataframe(title: str, df: pd.DataFrame) -> bytes:
             pdf.cell(col_width, 6, _pdf_safe(str(row[col])), border=1)
         pdf.ln()
 
-    return pdf.output(dest="S").encode("latin-1", "ignore")
+    pdf_out = pdf.output(dest="S")
+    return bytes(pdf_out) if isinstance(pdf_out, (bytearray, bytes)) else str(pdf_out).encode("latin-1", "ignore")
 
 def _pdf_current_calc(
     urun_adi: str,
@@ -573,6 +638,73 @@ def _pdf_current_calc(
     doviz_y2: pd.DataFrame
 ) -> bytes:
     """Anlik hesaplama raporunu PDF olarak olustur."""
+    if WEASYPRINT_AVAILABLE:
+        doviz_html_1 = _html_table_from_df(doviz_y1, header_title="Doviz Bazli Satis Fiyatlari (Yontem 1)")
+        doviz_html_2 = _html_table_from_df(doviz_y2, header_title="Doviz Bazli Satis Fiyatlari (Yontem 2)")
+
+        y1_rows = [
+            ("Birim Maliyet", fmt_tl(y1["maliyet"])),
+            ("Nakliye", fmt_tl(y1["nakliye"])),
+            ("Toplam Maliyet", fmt_tl(y1["toplam_maliyet"])),
+            ("Uygulanan Marj", f"%{marj:.1f}"),
+            ("Birim Satis Fiyati", fmt_tl(y1["satis"])),
+            ("Birim Kar", f"{fmt_tl(y1["kar"])} (%{y1["kar_pct"]:.1f})"),
+        ]
+        y2_rows = [
+            ("Birim Maliyet", fmt_tl(y2["maliyet"])),
+            ("Maliyet x (1+Marj%)", fmt_tl(y2["maliyet_marjli"])),
+            ("Nakliye (Eklenen)", fmt_tl(y2["nakliye"])),
+            ("Uygulanan Marj", f"%{marj:.1f}"),
+            ("Birim Satis Fiyati", fmt_tl(y2["satis"])),
+            ("Birim Kar", f"{fmt_tl(y2["kar"])} (%{y2["kar_pct"]:.1f})"),
+        ]
+
+        ozet_df = pd.DataFrame({
+            "Metrik": ["Birim Satis Fiyati (TL/kg)", "Birim Kar (TL/kg)", "Kar Marji (%)", "USD Satis Fiyati", "EUR Satis Fiyati"],
+            "Yontem 1": [
+                f"₺{y1['satis']:.4f}",
+                f"₺{y1['kar']:.4f}",
+                f"%{y1['kar_pct']:.2f}",
+                f"${y1['satis']/doviz_y1.iloc[0]['Kur (₺)']:.4f}" if not doviz_y1.empty and "Kur (₺)" in doviz_y1.columns else "—",
+                f"€{y1['satis']/doviz_y1.iloc[1]['Kur (₺)']:.4f}" if len(doviz_y1) > 1 else "—",
+            ],
+            "Yontem 2": [
+                f"₺{y2['satis']:.4f}",
+                f"₺{y2['kar']:.4f}",
+                f"%{y2['kar_pct']:.2f}",
+                f"${y2['satis']/doviz_y2.iloc[0]['Kur (₺)']:.4f}" if not doviz_y2.empty and "Kur (₺)" in doviz_y2.columns else "—",
+                f"€{y2['satis']/doviz_y2.iloc[1]['Kur (₺)']:.4f}" if len(doviz_y2) > 1 else "—",
+            ],
+            "Fark (Y1-Y2)": [f"₺{(y1['satis'] - y2['satis']):+.4f}", "—", "—", "—", "—"],
+        })
+
+        content = f"""
+        <div class="page-header">
+            <h1>Fiyat Hesaplama</h1>
+            <p>Urun ve sevkiyat bilgilerine gore fiyatlama raporu</p>
+        </div>
+        <div class="info-box">
+            <b>Urun:</b> {urun_adi} &nbsp;|&nbsp; <b>Fabrika:</b> {fabrika} &nbsp;|&nbsp; <b>Kategori:</b> {kategori}
+        </div>
+        <div class="two-col">
+            <div class="card">
+                <div class="badge">Yontem 1 - Toplu Marj</div>
+                {_html_metric_table(y1_rows)}
+            </div>
+            <div class="card">
+                <div class="badge badge-green">Yontem 2 - Kademeli Marj</div>
+                {_html_metric_table(y2_rows)}
+            </div>
+        </div>
+        <div class="two-col">
+            <div class="card">{doviz_html_1}</div>
+            <div class="card">{doviz_html_2}</div>
+        </div>
+        <div class="card">{_html_table_from_df(ozet_df, header_title="Yontem Karsilastirma Ozeti")}</div>
+        """
+
+        html = _html_report_base(page_title="Fiyat Hesaplama", content_html=content)
+        return HTML(string=html).write_pdf()
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=10)
     pdf.add_page()
@@ -612,7 +744,8 @@ def _pdf_current_calc(
         for _, row in doviz_y2.iterrows():
             pdf.cell(0, 5, _pdf_safe(f"{row['Para Birimi']}: {row['Satış Fiyatı']:.4f} | Kur: {row['Kur (₺)']:.2f}"), ln=1)
 
-    return pdf.output(dest="S").encode("latin-1", "ignore")
+    pdf_out = pdf.output(dest="S")
+    return bytes(pdf_out) if isinstance(pdf_out, (bytearray, bytes)) else str(pdf_out).encode("latin-1", "ignore")
 
 def hesapla_yontem1(maliyet: float, nakliye: float, marj_pct: float) -> Dict:
     """
@@ -1298,6 +1431,58 @@ def sayfa_nakliye_yonetimi():
                     "Ücret (₺/kg)": st.column_config.NumberColumn(format="₺%.4f"),
                 }
             )
+
+            # Tarife duzelt
+            st.markdown("---")
+            st.markdown("#### ✏️ Tarife Duzelt")
+            tarife_duzelt = [
+                f"[{r['id']}] {r['fabrika']} → {r['il']}{' / '+r['ilce'] if r['ilce'] else ''} = ₺{r['ucret']:.4f}"
+                for _, r in df_f.iterrows()
+            ]
+            if tarife_duzelt:
+                sec_duzelt = st.selectbox("Duzeltilecek tarife", tarife_duzelt, key="tarife_duzelt_sec")
+                sec_id = int(sec_duzelt.split("]")[0].replace("[", ""))
+                sec_row = df_f[df_f["id"] == sec_id].iloc[0]
+
+                col_e1, col_e2, col_e3 = st.columns(3)
+                with col_e1:
+                    fab_list = ["Gebze", "Adana", "Trabzon"]
+                    fab_idx = fab_list.index(sec_row["fabrika"]) if sec_row["fabrika"] in fab_list else 0
+                    e_fabrika = st.selectbox("Fabrika", fab_list, index=fab_idx, key="tarife_edit_fab")
+                with col_e2:
+                    il_idx = ILLER_SORTED.index(sec_row["il"]) if sec_row["il"] in ILLER_SORTED else 0
+                    e_il = st.selectbox("Sevk Ili", ILLER_SORTED, index=il_idx, key="tarife_edit_il")
+                with col_e3:
+                    e_ilce = st.text_input("Ilce", value=sec_row["ilce"] or "", key="tarife_edit_ilce")
+
+                e_ucret = st.number_input(
+                    "Nakliye Ucreti (TL/kg)",
+                    min_value=0.0,
+                    value=float(sec_row["ucret"]),
+                    step=0.05,
+                    format="%.4f",
+                    key="tarife_edit_ucret"
+                )
+
+                if st.button("✅ Tarifeyi Guncelle", type="primary", key="tarife_edit_btn"):
+                    try:
+                        conn = get_connection()
+                        conn.execute(
+                            """
+                            UPDATE nakliye
+                            SET fabrika=?, il=?, ilce=?, ucret=?, guncelleme_tarihi=CURRENT_TIMESTAMP
+                            WHERE id=?
+                            """,
+                            (e_fabrika, e_il, e_ilce.strip(), e_ucret, sec_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                        st.success("✅ Tarife guncellendi.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Guncelleme hatasi: {e}")
+            else:
+                st.markdown('<div class="warning-box">Liste bos. Duzeltme yapilacak tarife yok.</div>', unsafe_allow_html=True)
 
             # Tarife sil
             st.markdown("---")
