@@ -104,18 +104,18 @@ st.markdown("""
 
     /* Kur kartları */
     .kur-kart {
-        background: #f8fafc;
+        background: #e2e8f0;
         border-radius: 12px;
         padding: 16px 20px;
-        border: 1px solid #cbd5f5;
+        border: 2px solid #94a3b8;
         text-align: center;
-        box-shadow: 0 1px 6px rgba(15,23,42,0.08);
+        box-shadow: 0 2px 10px rgba(15,23,42,0.12);
         transition: transform 0.2s;
     }
     .kur-kart:hover { transform: translateY(-2px); }
-    .kur-kart .kur-label { font-size: 0.7rem; font-weight: 700; color: #1e293b; text-transform: uppercase; letter-spacing: 1px; }
-    .kur-kart .kur-value { font-size: 1.5rem; font-weight: 800; color: #0f172a; font-family: 'JetBrains Mono', monospace; }
-    .kur-kart .kur-sub { font-size: 0.72rem; color: #334155; margin-top: 2px; }
+    .kur-kart .kur-label { font-size: 0.72rem; font-weight: 800; color: #0b1220; text-transform: uppercase; letter-spacing: 1px; }
+    .kur-kart .kur-value { font-size: 1.6rem; font-weight: 900; color: #0b1220; font-family: 'JetBrains Mono', monospace; }
+    .kur-kart .kur-sub { font-size: 0.76rem; color: #0f172a; margin-top: 2px; }
 
     /* Hesaplama sonuç kartları */
     .result-card {
