@@ -308,11 +308,18 @@ def init_db():
             fabrika TEXT NOT NULL,
             il TEXT NOT NULL,
             ilce TEXT DEFAULT '',
+            nakliyeci_firma TEXT DEFAULT '',
             ucret REAL NOT NULL,
             guncelleme_tarihi TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fabrika, il, ilce)
         )
     """)
+
+    # Eski veritabanlari icin kolon ekle
+    c.execute("PRAGMA table_info(nakliye)")
+    nakliye_cols = [row["name"] for row in c.fetchall()]
+    if "nakliyeci_firma" not in nakliye_cols:
+        c.execute("ALTER TABLE nakliye ADD COLUMN nakliyeci_firma TEXT DEFAULT ''")
 
     # Hesaplama geçmişi tablosu
     c.execute("""
@@ -1271,6 +1278,78 @@ def sayfa_urun_yonetimi():
                 except Exception as e:
                     st.error(f"❌ Hata: {e}")
 
+        # Toplu urun import (Excel)
+        st.markdown("---")
+        st.markdown("#### 📂 Toplu Ürün Yükle (Excel)")
+        st.markdown('<div class="info-box">Excel sütunları: <b>urun_adi, fabrika, fabrika_kodu, kategori, maliyet, nakliye_fabrika</b></div>', unsafe_allow_html=True)
+
+        urun_taslak = pd.DataFrame([
+            {
+                "urun_adi": "LignoSüper 40",
+                "fabrika": "Gebze",
+                "fabrika_kodu": "14",
+                "kategori": "Ligno",
+                "maliyet": 18.50,
+                "nakliye_fabrika": 0.80,
+            }
+        ])
+        urun_taslak_xlsx = _excel_bytes_from_sheets({"Urun_Taslak": urun_taslak})
+        st.download_button(
+            "⬇️ Ürün Excel Taslağı",
+            data=urun_taslak_xlsx,
+            file_name="urun_taslak.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        urun_excel = st.file_uploader("Excel Dosyası Seç", type=["xlsx"], key="urun_excel")
+        if urun_excel is not None:
+            try:
+                xdf = pd.read_excel(urun_excel)
+                st.dataframe(xdf.head(10), use_container_width=True)
+
+                gereken = {"urun_adi", "fabrika", "fabrika_kodu", "kategori", "maliyet", "nakliye_fabrika"}
+                if not gereken.issubset(set(xdf.columns)):
+                    eksik = ", ".join(sorted(list(gereken - set(xdf.columns))))
+                    st.error(f"❌ Eksik sütunlar: {eksik}")
+                elif st.button("📥 Excel'i Veritabanına Aktar", key="urun_excel_import"):
+                    conn = get_connection()
+                    basari = 0
+                    hata = 0
+                    for _, row in xdf.iterrows():
+                        try:
+                            urun_adi_x = str(row.get("urun_adi", "")).strip()
+                            fabrika_x = str(row.get("fabrika", "")).strip()
+                            fabrika_kodu_x = str(row.get("fabrika_kodu", "")).strip()
+                            kategori_x = str(row.get("kategori", "")).strip()
+                            maliyet_x = float(row.get("maliyet", 0))
+                            nakliye_fab_x = float(row.get("nakliye_fabrika", 0))
+
+                            if not urun_adi_x or not fabrika_x or not kategori_x:
+                                raise ValueError("Zorunlu alan bos")
+
+                            if not fabrika_kodu_x:
+                                for _, f in FABRIKALAR.items():
+                                    if f["ad"] == fabrika_x:
+                                        fabrika_kodu_x = f["kod"]
+                                        break
+
+                            conn.execute(
+                                """
+                                INSERT INTO urunler (urun_adi, fabrika, fabrika_kodu, kategori, maliyet, nakliye_fabrika)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """,
+                                (urun_adi_x, fabrika_x, fabrika_kodu_x, kategori_x, maliyet_x, nakliye_fab_x)
+                            )
+                            basari += 1
+                        except Exception:
+                            hata += 1
+                    conn.commit()
+                    conn.close()
+                    st.success(f"✅ {basari} ürün aktarıldı. {hata} hata.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"❌ Excel okuma hatası: {e}")
+
     with tab2:
         conn = get_connection()
         df = pd.read_sql("SELECT * FROM urunler ORDER BY fabrika, kategori, urun_adi", conn)
@@ -1342,19 +1421,22 @@ def sayfa_nakliye_yonetimi():
     with tab1:
         st.markdown("#### Nakliye Tarifesi Tanımla")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             n_fabrika = st.selectbox("Fabrika *", ["Gebze", "Adana", "Trabzon"])
         with col2:
             n_il = st.selectbox("Sevk İli *", ILLER_SORTED)
         with col3:
             n_ilce = st.text_input("İlçe (Opsiyonel)", placeholder="Boş bırakılabilir")
+        with col4:
+            n_firma = st.text_input("Nakliyeci Firma (Opsiyonel)", placeholder="Örn: XYZ Lojistik")
 
         n_ucret = st.number_input("Nakliye Ücreti (TL/kg) *", min_value=0.0, value=1.00, step=0.05, format="%.4f")
 
         st.markdown(f"""
         <div class="info-box">
-            Eklenecek rota: <b>{n_fabrika}</b> → <b>{n_il}</b>{f" / {n_ilce.strip()}" if n_ilce.strip() else ""} = <b>₺{n_ucret:.4f}/kg</b>
+            Eklenecek rota: <b>{n_fabrika}</b> → <b>{n_il}</b>{f" / {n_ilce.strip()}" if n_ilce.strip() else ""}
+            {f" · <b>{n_firma.strip()}</b>" if n_firma.strip() else ""} = <b>₺{n_ucret:.4f}/kg</b>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1362,12 +1444,13 @@ def sayfa_nakliye_yonetimi():
             try:
                 conn = get_connection()
                 conn.execute("""
-                    INSERT INTO nakliye (fabrika, il, ilce, ucret, guncelleme_tarihi)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    INSERT INTO nakliye (fabrika, il, ilce, nakliyeci_firma, ucret, guncelleme_tarihi)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(fabrika, il, ilce) DO UPDATE SET
+                        nakliyeci_firma = excluded.nakliyeci_firma,
                         ucret = excluded.ucret,
                         guncelleme_tarihi = CURRENT_TIMESTAMP
-                """, (n_fabrika, n_il, n_ilce.strip(), n_ucret))
+                """, (n_fabrika, n_il, n_ilce.strip(), n_firma.strip(), n_ucret))
                 conn.commit()
                 conn.close()
                 st.success(f"✅ {n_fabrika} → {n_il} tarifesi kaydedildi: ₺{n_ucret:.4f}/kg")
@@ -1377,10 +1460,72 @@ def sayfa_nakliye_yonetimi():
 
         # Toplu import
         st.markdown("---")
-        st.markdown("#### 📂 Toplu Tarife Yükle (CSV)")
-        st.markdown('<div class="info-box">CSV formatı: <b>fabrika, il, ilce, ucret</b> (başlık satırı olmalı)</div>', unsafe_allow_html=True)
+        st.markdown("#### 📂 Toplu Tarife Yükle (Excel / CSV)")
+        st.markdown('<div class="info-box">Sütunlar: <b>fabrika, il, ilce, nakliyeci_firma, ucret</b> (başlık satırı olmalı)</div>', unsafe_allow_html=True)
 
-        yuklu_dosya = st.file_uploader("CSV Dosyası Seç", type=["csv"])
+        nakliye_taslak = pd.DataFrame([
+            {
+                "fabrika": "Gebze",
+                "il": "Istanbul",
+                "ilce": "",
+                "nakliyeci_firma": "XYZ Lojistik",
+                "ucret": 0.85,
+            }
+        ])
+        nakliye_taslak_xlsx = _excel_bytes_from_sheets({"Nakliye_Taslak": nakliye_taslak})
+        st.download_button(
+            "⬇️ Nakliye Excel Taslağı",
+            data=nakliye_taslak_xlsx,
+            file_name="nakliye_taslak.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        nakliye_excel = st.file_uploader("Excel Dosyası Seç", type=["xlsx"], key="nakliye_excel")
+        if nakliye_excel is not None:
+            try:
+                xdf = pd.read_excel(nakliye_excel)
+                st.dataframe(xdf.head(10), use_container_width=True)
+
+                gereken = {"fabrika", "il", "ilce", "nakliyeci_firma", "ucret"}
+                if not gereken.issubset(set(xdf.columns)):
+                    eksik = ", ".join(sorted(list(gereken - set(xdf.columns))))
+                    st.error(f"❌ Eksik sütunlar: {eksik}")
+                elif st.button("📥 Excel'i Veritabanına Aktar", key="nakliye_excel_import"):
+                    conn = get_connection()
+                    basari = 0
+                    hata = 0
+                    for _, row in xdf.iterrows():
+                        try:
+                            fabrika_x = str(row.get("fabrika", "")).strip()
+                            il_x = str(row.get("il", "")).strip()
+                            ilce_x = str(row.get("ilce", "")).strip()
+                            firma_x = str(row.get("nakliyeci_firma", "")).strip()
+                            ucret_x = float(row.get("ucret", 0))
+
+                            if not fabrika_x or not il_x:
+                                raise ValueError("Zorunlu alan bos")
+
+                            conn.execute(
+                                """
+                                INSERT INTO nakliye (fabrika, il, ilce, nakliyeci_firma, ucret)
+                                VALUES (?,?,?,?,?)
+                                ON CONFLICT(fabrika, il, ilce) DO UPDATE SET
+                                    nakliyeci_firma = excluded.nakliyeci_firma,
+                                    ucret = excluded.ucret
+                                """,
+                                (fabrika_x, il_x, ilce_x, firma_x, ucret_x)
+                            )
+                            basari += 1
+                        except Exception:
+                            hata += 1
+                    conn.commit()
+                    conn.close()
+                    st.success(f"✅ {basari} tarife aktarıldı. {hata} hata.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"❌ Excel okuma hatası: {e}")
+
+        yuklu_dosya = st.file_uploader("CSV Dosyası Seç", type=["csv"], key="nakliye_csv")
         if yuklu_dosya is not None:
             try:
                 csv_df = pd.read_csv(yuklu_dosya)
@@ -1392,11 +1537,14 @@ def sayfa_nakliye_yonetimi():
                     for _, row in csv_df.iterrows():
                         try:
                             conn.execute("""
-                                INSERT INTO nakliye (fabrika, il, ilce, ucret)
-                                VALUES (?,?,?,?)
-                                ON CONFLICT(fabrika, il, ilce) DO UPDATE SET ucret=excluded.ucret
+                                INSERT INTO nakliye (fabrika, il, ilce, nakliyeci_firma, ucret)
+                                VALUES (?,?,?,?,?)
+                                ON CONFLICT(fabrika, il, ilce) DO UPDATE SET
+                                    nakliyeci_firma=excluded.nakliyeci_firma,
+                                    ucret=excluded.ucret
                             """, (str(row.get("fabrika","")), str(row.get("il","")),
-                                  str(row.get("ilce","")), float(row.get("ucret",0))))
+                                  str(row.get("ilce","")), str(row.get("nakliyeci_firma","")),
+                                  float(row.get("ucret",0))))
                             basari += 1
                         except Exception:
                             hata += 1
@@ -1432,8 +1580,8 @@ def sayfa_nakliye_yonetimi():
             col_s2.metric("Ortalama Ücret", f"₺{df_f['ucret'].mean():.4f}" if not df_f.empty else "—")
             col_s3.metric("Maks. Ücret", f"₺{df_f['ucret'].max():.4f}" if not df_f.empty else "—")
 
-            display_df = df_f[["id","fabrika","il","ilce","ucret","guncelleme_tarihi"]].copy()
-            display_df.columns = ["ID","Fabrika","İl","İlçe","Ücret (₺/kg)","Güncelleme"]
+            display_df = df_f[["id","fabrika","il","ilce","nakliyeci_firma","ucret","guncelleme_tarihi"]].copy()
+            display_df.columns = ["ID","Fabrika","İl","İlçe","Nakliyeci Firma","Ücret (₺/kg)","Güncelleme"]
 
             st.dataframe(
                 display_df,
@@ -1448,7 +1596,8 @@ def sayfa_nakliye_yonetimi():
             st.markdown("---")
             st.markdown("#### ✏️ Tarife Duzelt")
             tarife_duzelt = [
-                f"[{r['id']}] {r['fabrika']} → {r['il']}{' / '+r['ilce'] if r['ilce'] else ''} = ₺{r['ucret']:.4f}"
+                f"[{r['id']}] {r['fabrika']} → {r['il']}{' / '+r['ilce'] if r['ilce'] else ''}"
+                f"{(' · ' + r['nakliyeci_firma']) if r['nakliyeci_firma'] else ''} = ₺{r['ucret']:.4f}"
                 for _, r in df_f.iterrows()
             ]
             if tarife_duzelt:
@@ -1456,7 +1605,7 @@ def sayfa_nakliye_yonetimi():
                 sec_id = int(sec_duzelt.split("]")[0].replace("[", ""))
                 sec_row = df_f[df_f["id"] == sec_id].iloc[0]
 
-                col_e1, col_e2, col_e3 = st.columns(3)
+                col_e1, col_e2, col_e3, col_e4 = st.columns(4)
                 with col_e1:
                     fab_list = ["Gebze", "Adana", "Trabzon"]
                     fab_idx = fab_list.index(sec_row["fabrika"]) if sec_row["fabrika"] in fab_list else 0
@@ -1466,6 +1615,8 @@ def sayfa_nakliye_yonetimi():
                     e_il = st.selectbox("Sevk Ili", ILLER_SORTED, index=il_idx, key="tarife_edit_il")
                 with col_e3:
                     e_ilce = st.text_input("Ilce", value=sec_row["ilce"] or "", key="tarife_edit_ilce")
+                with col_e4:
+                    e_firma = st.text_input("Nakliyeci Firma", value=sec_row["nakliyeci_firma"] or "", key="tarife_edit_firma")
 
                 e_ucret = st.number_input(
                     "Nakliye Ucreti (TL/kg)",
@@ -1482,10 +1633,10 @@ def sayfa_nakliye_yonetimi():
                         conn.execute(
                             """
                             UPDATE nakliye
-                            SET fabrika=?, il=?, ilce=?, ucret=?, guncelleme_tarihi=CURRENT_TIMESTAMP
+                            SET fabrika=?, il=?, ilce=?, nakliyeci_firma=?, ucret=?, guncelleme_tarihi=CURRENT_TIMESTAMP
                             WHERE id=?
                             """,
-                            (e_fabrika, e_il, e_ilce.strip(), e_ucret, sec_id)
+                            (e_fabrika, e_il, e_ilce.strip(), e_firma.strip(), e_ucret, sec_id)
                         )
                         conn.commit()
                         conn.close()
