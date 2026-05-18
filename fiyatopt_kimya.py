@@ -22,6 +22,7 @@ except Exception:
     WEASYPRINT_AVAILABLE = False
 from typing import Optional, Tuple, Dict
 import traceback
+from decimal import Decimal, ROUND_HALF_UP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SAYFA AYARLARI
@@ -511,6 +512,13 @@ def fmt_doviz(value: float, simge: str = "$") -> str:
     """Döviz formatla."""
     return f"{simge}{value:,.4f}"
 
+def _round_half_up(value: float, ndigits: int = 2) -> float:
+    """Yarim ve ustu yukari yuvarla (half-up)."""
+    if value is None:
+        return 0.0
+    quant = Decimal("1").scaleb(-ndigits)
+    return float(Decimal(str(value)).quantize(quant, rounding=ROUND_HALF_UP))
+
 def _excel_bytes_from_sheets(sheets: Dict[str, pd.DataFrame]) -> bytes:
     """DataFrame sözlüğünü Excel'e yaz ve bytes döndür."""
     buffer = BytesIO()
@@ -980,10 +988,12 @@ def sayfa_hesaplama(kurlar: Dict):
         for kod in ["USD", "EUR", "GBP", "CHF"]:
             kur = kurlar.get(kod) if kurlar else None
             if kur and kur > 0:
+                doviz_fiyat = _round_half_up(satis_tl / kur, 2)
                 satirlar.append({
                     "Para Birimi": f"{simgeler[kod]} {kod}",
-                    "Satış Fiyatı": satis_tl / kur,
-                    "Kur (₺)": kur,
+                    "Satış Fiyatı": doviz_fiyat,
+                    "Satış Fiyatı (₺)": _round_half_up(satis_tl, 2),
+                    "Kur (₺)": _round_half_up(kur, 2),
                 })
         return pd.DataFrame(satirlar)
 
@@ -1034,7 +1044,8 @@ def sayfa_hesaplama(kurlar: Dict):
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Satış Fiyatı": st.column_config.NumberColumn(format="%.4f"),
+                    "Satış Fiyatı": st.column_config.NumberColumn(format="%.2f"),
+                    "Satış Fiyatı (₺)": st.column_config.NumberColumn(format="₺%.2f"),
                     "Kur (₺)": st.column_config.NumberColumn(format="₺%.2f"),
                 }
             )
@@ -1086,7 +1097,8 @@ def sayfa_hesaplama(kurlar: Dict):
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Satış Fiyatı": st.column_config.NumberColumn(format="%.4f"),
+                    "Satış Fiyatı": st.column_config.NumberColumn(format="%.2f"),
+                    "Satış Fiyatı (₺)": st.column_config.NumberColumn(format="₺%.2f"),
                     "Kur (₺)": st.column_config.NumberColumn(format="₺%.2f"),
                 }
             )
